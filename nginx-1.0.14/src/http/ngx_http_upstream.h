@@ -122,9 +122,9 @@ struct ngx_http_upstream_srv_conf_s {
 typedef struct {
     ngx_http_upstream_srv_conf_t    *upstream;
 
-    ngx_msec_t                       connect_timeout;
-    ngx_msec_t                       send_timeout;
-    ngx_msec_t                       read_timeout;
+    ngx_msec_t                       connect_timeout;  // 连接上游服务器 超时时间
+    ngx_msec_t                       send_timeout;   // 发送tcp 包到上游的超时时间
+    ngx_msec_t                       read_timeout;  // 收到tcp 包的超时时间
     ngx_msec_t                       timeout;
 
     size_t                           send_lowat;
@@ -259,18 +259,18 @@ struct ngx_http_upstream_s {
 
     ngx_event_pipe_t                *pipe;
 
-    ngx_chain_t                     *request_bufs;
+    ngx_chain_t                     *request_bufs; // 发送什么样的请求给上游
 
     ngx_output_chain_ctx_t           output;
     ngx_chain_writer_ctx_t           writer;
 
-    ngx_http_upstream_conf_t        *conf;
+    ngx_http_upstream_conf_t        *conf;  // 限制参数
 
     ngx_http_upstream_headers_in_t   headers_in;
 
-    ngx_http_upstream_resolved_t    *resolved;
+    ngx_http_upstream_resolved_t    *resolved; // 上游服务器地址
 
-    ngx_buf_t                        buffer;
+    ngx_buf_t                        buffer;  // 上游服务器响应
     size_t                           length;
 
     ngx_chain_t                     *out_bufs;
@@ -284,14 +284,14 @@ struct ngx_http_upstream_s {
 #if (NGX_HTTP_CACHE)
     ngx_int_t                      (*create_key)(ngx_http_request_t *r);
 #endif
-    ngx_int_t                      (*create_request)(ngx_http_request_t *r);
+    ngx_int_t                      (*create_request)(ngx_http_request_t *r); // 发送给上游服务器的请求内容
     ngx_int_t                      (*reinit_request)(ngx_http_request_t *r);
-    ngx_int_t                      (*process_header)(ngx_http_request_t *r);
+    ngx_int_t                      (*process_header)(ngx_http_request_t *r); // 收到响应后回调
     void                           (*abort_request)(ngx_http_request_t *r);
     void                           (*finalize_request)(ngx_http_request_t *r,
-                                         ngx_int_t rc);
+                                                       ngx_int_t rc);  // 销毁时调用
     ngx_int_t                      (*rewrite_redirect)(ngx_http_request_t *r,
-                                         ngx_table_elt_t *h, size_t prefix);
+                                                       ngx_table_elt_t *h, size_t prefix);
 
     ngx_msec_t                       timeout;
 
@@ -306,12 +306,12 @@ struct ngx_http_upstream_s {
     unsigned                         store:1;
     unsigned                         cacheable:1;
     unsigned                         accel:1;
-    unsigned                         ssl:1;
+    unsigned                         ssl:1;  // 是否基于ssl
 #if (NGX_HTTP_CACHE)
     unsigned                         cache_status:3;
 #endif
 
-    unsigned                         buffering:1;
+    unsigned                         buffering:1;  // 是否使用多个缓冲区？
 
     unsigned                         request_sent:1;
     unsigned                         header_sent:1;
