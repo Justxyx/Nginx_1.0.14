@@ -2333,7 +2333,18 @@ ngx_http_gzip_quantity(u_char *p, u_char *last)
 
 #endif
 
-
+/**
+ * 创建一个子请求并执行。
+ *
+ * @param r         当前请求（主请求）的指针。
+ * @param uri       子请求的目标 URI（类型为 ngx_str_t）。
+ * @param args      子请求的查询参数（类型为 ngx_str_t，可以为 NULL）。
+ * @param psr       用于存储子请求指针的地址（输出参数）。
+ * @param ps        子请求完成后的回调函数及其数据（类型为 ngx_http_post_subrequest_t，可以为 NULL）。
+ * @param flags     子请求的标志位（例如 NGX_HTTP_SUBREQUEST_IN_MEMORY）。
+ *
+ * @return          返回 NGX_OK 表示成功，返回其他值表示失败。
+ */
 ngx_int_t
 ngx_http_subrequest(ngx_http_request_t *r,
     ngx_str_t *uri, ngx_str_t *args, ngx_http_request_t **psr,

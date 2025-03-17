@@ -318,8 +318,8 @@ typedef ngx_int_t (*ngx_http_post_subrequest_pt)(ngx_http_request_t *r,
     void *data, ngx_int_t rc);
 
 typedef struct {
-    ngx_http_post_subrequest_pt       handler;
-    void                             *data;
+    ngx_http_post_subrequest_pt       handler;  // 子请求完成后的回调函数，用于处理子请求的结果
+    void                             *data;     // 传递给回调函数的自定义数据（可以是任意类型）
 } ngx_http_post_subrequest_t;
 
 
@@ -460,7 +460,7 @@ struct ngx_http_request_s {
     unsigned                          request_body_file_group_access:1;
     unsigned                          request_body_file_log_level:3;
 
-    unsigned                          subrequest_in_memory:1;
+    unsigned                          subrequest_in_memory:1; // 决定了子请求的输出是直接发送到客户端，还是存储在内存中供后续处理。
     unsigned                          waited:1;
 
 #if (NGX_HTTP_CACHE)
