@@ -53,10 +53,10 @@ struct ngx_http_log_ctx_s {
 
 
 typedef struct {
-    ngx_uint_t           code;
-    ngx_uint_t           count;
-    u_char              *start;
-    u_char              *end;
+    ngx_uint_t           code;   /* HTTP 状态码数值，例如 200、302、404 */
+    ngx_uint_t           count;  /* 状态码字符数，例如 "302" count=3 */
+    u_char              *start; /* 指向 buffer 中状态行开头，例如 "302 Found..." */
+    u_char              *end;   /* 指向状态行末尾（不包含 \r\n），用于计算状态行长度 */
 } ngx_http_status_t;
 
 
