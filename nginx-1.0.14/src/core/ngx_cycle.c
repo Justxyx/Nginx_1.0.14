@@ -39,6 +39,62 @@ static ngx_connection_t  dumb;
 static ngx_str_t  error_log = ngx_string(NGX_ERROR_LOG_PATH);
 
 
+/*
+ * 入口函数：初始化一个新的 ngx_cycle_t（Nginx 运行周期/运行环境）
+ *
+ * 参数：
+ *   &init_cycle  -> 临时的轻量级 cycle，仅包含最基本的内存池和日志，
+ *                   用于第一次创建完整 cycle 的模板。
+ *
+ * 返回值：
+ *   ngx_cycle_t* -> 指向创建好的完整 cycle，包括：
+ *                     - 所有模块配置结构体
+ *                     - 日志文件对象
+ *                     - 共享内存区
+ *                     - 打开的文件句柄
+ *                     - 监听端口信息
+ *
+ * 作用：
+ *   1️⃣ 解析 nginx.conf 配置文件，并为每个模块生成配置结构。
+ *   2️⃣ 为核心模块（NGX_CORE_MODULE）调用 create_conf 初始化配置。
+ *   3️⃣ 初始化所有模块的上下文 ctx，形成四级指针 conf_ctx，用于在运行时访问配置。
+ *   4️⃣ 打开/创建 error_log、open_files 等资源。
+ *   5️⃣ 创建共享内存区域（worker 进程间通信）。
+ *   6️⃣ 初始化监听 socket（listen 指令）。
+ *   7️⃣ 提交新 cycle 配置：
+ *       - 日志重定向到正式 error_log
+ *       - 调用每个模块的 init_module 全局初始化函数
+ *   8️⃣ 处理旧 cycle（reload 时）：
+ *       - 将旧 cycle 保存到 ngx_old_cycles 数组
+ *       - 启动 ngx_cleaner_event 定时器，延迟清理旧 cycle
+ *
+ * 特点：
+ *   - **统一入口**：不论是首次启动还是 reload，都走同一段逻辑。
+ *   - **安全复用**：reload 时尽量复用旧的 socket、共享内存和日志文件。
+ *   - **全局初始化**：模块配置和资源在这里生成和提交，新 worker 进程会继承。
+ *   - **平滑切换**：旧 worker 仍可运行，等新 worker 就绪后再安全关闭旧 cycle。
+ *
+ * 使用场景：
+ *   - Nginx 启动时：创建第一个完整 cycle。
+ *   - Nginx reload 时：基于旧 cycle 构建新的 cycle，并平滑替换。
+ *
+ * 核心流程简化：
+ *   init_cycle (临时)
+ *       │
+ *       ▼
+ *   ngx_init_cycle()
+ *       ├─ 解析配置文件
+ *       ├─ 核心模块 create_conf
+ *       ├─ 其他模块 create_conf
+ *       ├─ open_files
+ *       ├─ shared_memory
+ *       ├─ 监听端口 listen
+ *       ├─ 提交新 cycle（日志重定向 + init_module）
+ *       └─ 保存旧 cycle（reload 场景）
+ *       │
+ *       ▼
+ *   返回完整 cycle → master 或单进程继续启动 worker
+ */
 ngx_cycle_t *
 ngx_init_cycle(ngx_cycle_t *old_cycle)
 {
@@ -212,6 +268,7 @@ ngx_init_cycle(ngx_cycle_t *old_cycle)
     ngx_strlow(cycle->hostname.data, (u_char *) hostname, cycle->hostname.len);
 
 
+    // 配置解析准备阶段， 为每一个 核心模块（NGX_CORE_MODULE） 分配并创建它自己的配置结构。
     for (i = 0; ngx_modules[i]; i++) {
         if (ngx_modules[i]->type != NGX_CORE_MODULE) {
             continue;
@@ -219,6 +276,7 @@ ngx_init_cycle(ngx_cycle_t *old_cycle)
 
         module = ngx_modules[i]->ctx;
 
+        // nginx.c/ngx_core_module_create_conf
         if (module->create_conf) {
             rv = module->create_conf(cycle);
             if (rv == NULL) {
@@ -232,6 +290,16 @@ ngx_init_cycle(ngx_cycle_t *old_cycle)
 
     senv = environ;
 
+    /*
+     * todo  这个函数还是有点复杂 主要包含以下几点：
+     *
+     * 1. 初始化配置解析上下文
+     * 2. 解析配置文件（nginx.conf）
+     * 3. 初始化各模块
+     * 4. 打开监听端口
+     * 5. 调用各模块的 init_process/init_master（视阶段而定）
+     *     在 master/worker 启动阶段，后续会分别调用：
+     */
 
     ngx_memzero(&conf, sizeof(ngx_conf_t));
     /* STUB: init array ? */
@@ -259,12 +327,14 @@ ngx_init_cycle(ngx_cycle_t *old_cycle)
     log->log_level = NGX_LOG_DEBUG_ALL;
 #endif
 
+    // 来解析命令行参数（例如 -g "daemon off;"）
     if (ngx_conf_param(&conf) != NGX_CONF_OK) {
         environ = senv;
         ngx_destroy_cycle_pools(&conf);
         return NULL;
     }
 
+    // 配置解析主入口
     if (ngx_conf_parse(&conf, &cycle->conf_file) != NGX_CONF_OK) {
         environ = senv;
         ngx_destroy_cycle_pools(&conf);
@@ -276,6 +346,7 @@ ngx_init_cycle(ngx_cycle_t *old_cycle)
                        cycle->conf_file.data);
     }
 
+    // 核心模块调用 init_conf
     for (i = 0; ngx_modules[i]; i++) {
         if (ngx_modules[i]->type != NGX_CORE_MODULE) {
             continue;
@@ -294,10 +365,19 @@ ngx_init_cycle(ngx_cycle_t *old_cycle)
         }
     }
 
+    // like nginx -s reload ~
+    /*
+     * 这些命令不会启动新的 Nginx 服务，而是：
+     * 启动一个 临时的 signaller 进程；
+     * 它会读取配置文件和 nginx.pid
+     * 然后向主进程发送相应信号（HUP, QUIT, TERM, USR1 等）；
+     * 发送完信号后立即退出。
+     */
     if (ngx_process == NGX_PROCESS_SIGNALLER) {
         return cycle;
     }
 
+    // ngx_core_module 核心结构体配置
     ccf = (ngx_core_conf_t *) ngx_get_conf(cycle->conf_ctx, ngx_core_module);
 
     if (ngx_test_config) {
@@ -347,7 +427,7 @@ ngx_init_cycle(ngx_cycle_t *old_cycle)
     }
 
     /* open the new files */
-
+    // 重新打开所有日志文件
     part = &cycle->open_files.part;
     file = part->elts;
 
@@ -397,7 +477,7 @@ ngx_init_cycle(ngx_cycle_t *old_cycle)
 
 
     /* create shared memory */
-
+    // 多个 worker 进程之间共享状态、通信、协作。
     part = &cycle->shared_memory.part;
     shm_zone = part->elts;
 
@@ -483,7 +563,7 @@ ngx_init_cycle(ngx_cycle_t *old_cycle)
 
 
     /* handle the listening sockets */
-
+    // 处理监听套接字（listening sockets） 在启动或 reload 时，保证新旧配置的监听端口能平滑过渡，不中断连接。
     if (old_cycle->listening.nelts) {
         ls = old_cycle->listening.elts;
         for (i = 0; i < old_cycle->listening.nelts; i++) {
@@ -579,7 +659,7 @@ ngx_init_cycle(ngx_cycle_t *old_cycle)
 
 
     /* commit the new cycle configuration */
-
+    // 新配置正式生效
     if (!ngx_use_stderr && cycle->log->file->fd != ngx_stderr) {
 
         if (ngx_set_stderr(cycle->log->file->fd) == NGX_FILE_ERROR) {
@@ -589,7 +669,7 @@ ngx_init_cycle(ngx_cycle_t *old_cycle)
     }
 
     pool->log = cycle->log;
-
+    // 调用所有的模块的 /* init module */
     for (i = 0; ngx_modules[i]; i++) {
         if (ngx_modules[i]->init_module) {
             if (ngx_modules[i]->init_module(cycle) != NGX_OK) {
@@ -736,6 +816,8 @@ old_shm_zone_done:
     }
 
 
+    // Nginx 在 reload 生命周期管理 里的一块“垃圾回收机制（旧 cycle 清理）”。
+    // todo 其实是一个守护系统稳定性、防止内存泄漏的设计亮点。
     if (ngx_temp_pool == NULL) {
         ngx_temp_pool = ngx_create_pool(128, cycle->log);
         if (ngx_temp_pool == NULL) {

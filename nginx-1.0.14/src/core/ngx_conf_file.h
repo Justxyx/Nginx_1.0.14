@@ -109,32 +109,31 @@ struct ngx_open_file_s {
 #define NGX_MODULE_V1_PADDING  0, 0, 0, 0, 0, 0, 0, 0
 
 struct ngx_module_s {
-    ngx_uint_t            ctx_index;
-    ngx_uint_t            index;
+    ngx_uint_t            ctx_index;      /* 模块在 ctx 数组中的索引，用于 conf_ctx 查找模块配置 模块在“自己类型的模块上下文数组”里的编号。 比如它是第几个 HTTP 模块、第几个 EVENT 模块。 */
+    ngx_uint_t            index;          /* 模块在 ngx_modules[] 数组中的唯一编号 */
 
-    ngx_uint_t            spare0;
-    ngx_uint_t            spare1;
-    ngx_uint_t            spare2;
-    ngx_uint_t            spare3;
+    ngx_uint_t            spare0;         /* 备用字段（保留未用） */
+    ngx_uint_t            spare1;         /* 备用字段 */
+    ngx_uint_t            spare2;         /* 备用字段 */
+    ngx_uint_t            spare3;         /* 备用字段 */
 
-    ngx_uint_t            version;
+    ngx_uint_t            version;        /* Nginx 模块版本号（用于二进制兼容检查） */
 
-    void                 *ctx;
-    ngx_command_t        *commands;
-    ngx_uint_t            type;
+    void                 *ctx;            /* 模块上下文指针（模块专用数据/回调集合） */
+    ngx_command_t        *commands;       /* 模块可用指令列表（解析 nginx.conf） */
+    ngx_uint_t            type;           /* 模块类型（NGX_CORE_MODULE/NGX_HTTP_MODULE/NGX_HTTP_FILTER_MODULE 等） */
 
-    ngx_int_t           (*init_master)(ngx_log_t *log);
+    ngx_int_t           (*init_master)(ngx_log_t *log);    /* master 进程初始化时调用 */
+    ngx_int_t           (*init_module)(ngx_cycle_t *cycle);/* 模块全局初始化（cycle 层面） */
 
-    ngx_int_t           (*init_module)(ngx_cycle_t *cycle);
+    ngx_int_t           (*init_process)(ngx_cycle_t *cycle); /* worker 进程初始化 */
+    ngx_int_t           (*init_thread)(ngx_cycle_t *cycle);  /* 线程初始化（少用，多数情况下为空） */
+    void                (*exit_thread)(ngx_cycle_t *cycle);  /* 线程退出回调 */
+    void                (*exit_process)(ngx_cycle_t *cycle); /* worker 进程退出回调 */
 
-    ngx_int_t           (*init_process)(ngx_cycle_t *cycle);
-    ngx_int_t           (*init_thread)(ngx_cycle_t *cycle);
-    void                (*exit_thread)(ngx_cycle_t *cycle);
-    void                (*exit_process)(ngx_cycle_t *cycle);
+    void                (*exit_master)(ngx_cycle_t *cycle);  /* master 进程退出回调 */
 
-    void                (*exit_master)(ngx_cycle_t *cycle);
-
-    uintptr_t             spare_hook0;
+    uintptr_t             spare_hook0;    /* 备用 hook 字段 */
     uintptr_t             spare_hook1;
     uintptr_t             spare_hook2;
     uintptr_t             spare_hook3;
@@ -145,10 +144,11 @@ struct ngx_module_s {
 };
 
 
+
 typedef struct {
-    ngx_str_t             name;
-    void               *(*create_conf)(ngx_cycle_t *cycle);
-    char               *(*init_conf)(ngx_cycle_t *cycle, void *conf);
+    ngx_str_t  name;                                     // 核心模块名字，例如 "core"
+    void      *(*create_conf)(ngx_cycle_t *cycle);      // 创建该模块的配置结构
+    char      *(*init_conf)(ngx_cycle_t *cycle, void *conf); // 初始化配置（填默认值）
 } ngx_core_module_t;
 
 
@@ -162,23 +162,23 @@ typedef struct {
 typedef char *(*ngx_conf_handler_pt)(ngx_conf_t *cf,
     ngx_command_t *dummy, void *conf);
 
-
+// Nginx 用来解析配置文件（nginx.conf）时的上下文结构体
 struct ngx_conf_s {
-    char                 *name;
-    ngx_array_t          *args;
+    char                 *name;          // 当前正在解析的指令名，例如 "http"、"server"、"listen"
+    ngx_array_t          *args;          // 当前指令的参数数组，每个参数是 ngx_str_t 类型
 
-    ngx_cycle_t          *cycle;
-    ngx_pool_t           *pool;
-    ngx_pool_t           *temp_pool;
-    ngx_conf_file_t      *conf_file;
-    ngx_log_t            *log;
+    ngx_cycle_t          *cycle;         // 当前解析时所在的全局 cycle 环境，提供日志、内存池、连接等
+    ngx_pool_t           *pool;          // 持久内存池，用于配置解析期间的分配
+    ngx_pool_t           *temp_pool;     // 临时内存池，用于临时分配，解析完成后可释放
+    ngx_conf_file_t      *conf_file;     // 当前解析的配置文件信息，包括文件名、行号、文件句柄
+    ngx_log_t            *log;           // 当前解析阶段使用的日志对象，用于记录错误和警告
 
-    void                 *ctx;
-    ngx_uint_t            module_type;
-    ngx_uint_t            cmd_type;
+    void                 *ctx;           // 模块上下文指针，指向当前模块的配置数据
+    ngx_uint_t            module_type;   // 当前正在解析的模块类型，例如 NGX_CORE_MODULE、NGX_HTTP_MODULE
+    ngx_uint_t            cmd_type;      // 当前指令所属类型，用于区分主配置、块配置、location 等
 
-    ngx_conf_handler_pt   handler;
-    char                 *handler_conf;
+    ngx_conf_handler_pt   handler;       // 处理块指令的回调函数，如 http {}、server {}，负责进入下一级解析
+    char                 *handler_conf;  // handler 使用的配置上下文指针，用于在回调中传递配置数据
 };
 
 

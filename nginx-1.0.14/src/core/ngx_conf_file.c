@@ -59,7 +59,7 @@ static ngx_uint_t argument_number[] = {
     NGX_CONF_TAKE7
 };
 
-
+// 来解析命令行参数（例如 -g "daemon off;"）
 char *
 ngx_conf_param(ngx_conf_t *cf)
 {
@@ -98,7 +98,7 @@ ngx_conf_param(ngx_conf_t *cf)
     return rv;
 }
 
-
+// 配置系统的主解析器   nginx.conf   include xxx.conf 等
 char *
 ngx_conf_parse(ngx_conf_t *cf, ngx_str_t *filename)
 {
@@ -169,8 +169,9 @@ ngx_conf_parse(ngx_conf_t *cf, ngx_str_t *filename)
     }
 
 
+    // 逐行解析 并调用handler
     for ( ;; ) {
-        rc = ngx_conf_read_token(cf);
+        rc = ngx_conf_read_token(cf);  //  解析一行配置
 
         /*
          * ngx_conf_read_token() may return
@@ -241,7 +242,13 @@ ngx_conf_parse(ngx_conf_t *cf, ngx_str_t *filename)
         }
 
 
-        rc = ngx_conf_handler(cf, rc);
+        /*
+         *  这个就是核心解析了
+         *   1. “取结构体”：找到存放配置的位置
+         *   2. “赋值”：把指令的值写进结构体
+         *   3. 核心模块配置简单，直接写在一层结构体里，不像 HTTP 那么多层嵌套。
+         */
+        rc = ngx_conf_handler(cf, rc); // 执行这条指令（找到模块命令、调用回调函数）
 
         if (rc == NGX_ERROR) {
             goto failed;
@@ -286,7 +293,7 @@ ngx_conf_handler(ngx_conf_t *cf, ngx_int_t last)
     ngx_str_t      *name;
     ngx_command_t  *cmd;
 
-    name = cf->args->elts;
+    name = cf->args->elts;  // 可以把断点打到这里 做配置解析
 
     multi = 0;
 
@@ -378,7 +385,7 @@ ngx_conf_handler(ngx_conf_t *cf, ngx_int_t last)
             conf = NULL;
 
             if (cmd->type & NGX_DIRECT_CONF) {
-                conf = ((void **) cf->ctx)[ngx_modules[i]->index];
+                conf = ((void **) cf->ctx)[ngx_modules[i]->index]; // 这一行从全局 ctx 数组中 取到模块自己的配置结构。
 
             } else if (cmd->type & NGX_MAIN_CONF) {
                 conf = &(((void **) cf->ctx)[ngx_modules[i]->index]);
@@ -391,7 +398,7 @@ ngx_conf_handler(ngx_conf_t *cf, ngx_int_t last)
                 }
             }
 
-            rv = cmd->set(cf, cmd, conf);
+            rv = cmd->set(cf, cmd, conf); // Nginx 配置解析真正写入模块配置结构的关键点。  http 模块走入 ngx_http_block
 
             if (rv == NGX_CONF_OK) {
                 return NGX_OK;
@@ -430,7 +437,7 @@ invalid:
     return NGX_ERROR;
 }
 
-
+// 从配置文件中读取一条完整的“指令（directive）”，并把它拆分成 token（关键字和参数），依次放入 cf->args 这个数组中。
 static ngx_int_t
 ngx_conf_read_token(ngx_conf_t *cf)
 {

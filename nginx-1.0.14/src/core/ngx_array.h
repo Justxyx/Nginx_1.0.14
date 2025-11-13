@@ -14,11 +14,11 @@
 
 
 struct ngx_array_s {
-    void        *elts;
-    ngx_uint_t   nelts;
-    size_t       size;
-    ngx_uint_t   nalloc;
-    ngx_pool_t  *pool;
+    void        *elts;      /* 元素存储的起始指针 */
+    ngx_uint_t   nelts;     /* 当前已经占用了多少个 */
+    size_t       size;      /* 每个元素的大小 */
+    ngx_uint_t   nalloc;    /* 初始分配多少个 超过该值扩容*/
+    ngx_pool_t  *pool;      /* 使用的内存池 */
 };
 
 

@@ -134,8 +134,84 @@ ngx_master_process_cycle(ngx_cycle_t *cycle)
 
     ccf = (ngx_core_conf_t *) ngx_get_conf(cycle->conf_ctx, ngx_core_module);
 
+    /*
+     *   todo源码阅读四个阶段：
+     *   第一阶段（已完成）：main → ngx_init_cycle → 配置解析 → master/worker 分支
+     *   第二阶段：worker 启动 + HTTP 请求处理 → 重点在事件循环、HTTP phase 流程
+     *   第三阶段：master 管理 worker + reload + 信号处理 → 重点在进程管理逻辑
+     *   第四阶段：可选进程（cache manager）及全局资源管理 → 了解即可，不必深入
+     *
+     */
+        /*
+         *  注释主要为http 模块，stream、mail 等模块 在 Nginx 架构里属于
+         *  可选协议模块，它们的处理逻辑和 HTTP 模块类似，简要逻辑说明如下：
+         *
+         * -----------------------------------------------------------------------------
+         * 可选协议模块（HTTP / Stream / Mail）处理流程说明
+         * -----------------------------------------------------------------------------
+         * 1️⃣ 配置初始化阶段（ngx_init_cycle + ngx_conf_parse）
+         *
+         *    - HTTP 模块：
+         *        ngx_http_block() → create_main_conf / create_srv_conf / create_loc_conf
+         *
+         *    - Stream 模块：
+         *        ngx_stream_block() → create_main_conf / create_srv_conf / create_listen_conf
+         *
+         *    - Mail 模块：
+         *        ngx_mail_block() → create_main_conf / create_srv_conf / create_listen_conf
+         *
+         *    核心点：
+         *      - 所有模块的配置结构都存放在 cycle->conf_ctx 四级指针中
+         *      - 核心模块 (NGX_CORE_MODULE) 配置简单，HTTP/Stream/Mail 配置有多层嵌套
+         *
+         * -----------------------------------------------------------------------------
+         * 2️⃣ Worker 事件循环阶段（ngx_worker_process_cycle）
+         *
+         *    - Worker 初始化：
+         *        - 调用各模块 init_module / init_process
+         *        - 注册模块 handler
+         *          HTTP   -> ngx_http_init_phase_handlers()
+         *          Stream -> ngx_stream_init_phase_handlers()
+         *          Mail   -> ngx_mail_init_phase_handlers()
+         *
+         *    - 请求处理：
+         *        - HTTP   -> ngx_http_process_request() → phase handler（rewrite, access, content…）
+         *        - Stream -> ngx_stream_session_handler() → phase handler（preread, access, content…）
+         *        - Mail   -> ngx_mail_session_handler() → phase handler（auth, protocol, content…）
+         *
+         *    核心点：
+         *      - 事件循环统一由 worker 进程管理
+         *      - 模块 handler 根据会话类型执行对应逻辑
+         *
+         * -----------------------------------------------------------------------------
+         * 3️⃣ Master 进程管理阶段（ngx_master_process_cycle）
+         *
+         *    - fork worker 进程：
+         *        - master 不区分模块类型，所有 worker 共享同一 master 管理
+         *        - worker 进程根据配置初始化自己需要的模块 handler
+         *
+         *    - 平滑 reload：
+         *        - master fork 新 worker
+         *        - 旧 worker 完成正在处理的请求后退出
+         *        - cycle 和 conf_ctx 逐步替换
+         *
+         * -----------------------------------------------------------------------------
+         * 4️⃣ 核心理解
+         *
+         *    - HTTP / Stream / Mail 模块流程一致：
+         *        配置解析 → create_conf → conf_ctx 存储 → worker 初始化 → session/request handler
+         *
+         *    - master 负责管理所有 worker，不直接处理请求
+         *    - worker 执行事件循环处理客户端请求
+         *    - 所有协议模块共享 master-worker 架构，只是 handler 不同
+         *
+         * -----------------------------------------------------------------------------
+         */
+
+    // worker 进程
     ngx_start_worker_processes(cycle, ccf->worker_processes,
                                NGX_PROCESS_RESPAWN);
+    // master cache 进程， 一般不启用
     ngx_start_cache_manager_processes(cycle, 0);
 
     ngx_new_binary = 0;
@@ -143,6 +219,7 @@ ngx_master_process_cycle(ngx_cycle_t *cycle)
     sigio = 0;
     live = 1;
 
+    // master 主循环 = 等待信号 + 管理子进程
     for ( ;; ) {
         if (delay) {
             if (ngx_sigalrm) {
@@ -344,6 +421,10 @@ ngx_single_process_cycle(ngx_cycle_t *cycle)
 }
 
 
+/*
+ * - fork n 个 worker 进程
+ * - 为每个 worker 进程初始化 IPC channel（进程间通信）
+ */
 static void
 ngx_start_worker_processes(ngx_cycle_t *cycle, ngx_int_t n, ngx_int_t type)
 {
@@ -358,6 +439,11 @@ ngx_start_worker_processes(ngx_cycle_t *cycle, ngx_int_t n, ngx_int_t type)
 
         cpu_affinity = ngx_get_cpu_affinity(i);
 
+        /* fork 出 worker 进程
+         * ngx_worker_process_cycle 是 worker 进程的主循环函数
+         * "worker process" 是进程名称
+         * type 决定进程的重启策略
+         */
         ngx_spawn_process(cycle, ngx_worker_process_cycle, NULL,
                           "worker process", type);
 

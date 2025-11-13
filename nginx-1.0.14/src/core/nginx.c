@@ -209,6 +209,9 @@ main(int argc, char *const *argv)
 #endif
 
     if (ngx_strerror_init() != NGX_OK) {
+        // 初始化 Nginx 自己的错误字符串表 ngx_sys_errlist
+        // → 基于标准库 strerror() 复制系统错误信息
+        // → 避免在信号处理或多线程环境中直接调用非异步安全的 strerror()
         return 1;
     }
 
@@ -277,6 +280,14 @@ main(int argc, char *const *argv)
 
     ngx_pid = ngx_getpid();
 
+
+//    1. 创建文件
+//    xm@hcss-ecs-4208:/usr/local/nginx/sbin/logs$ pwd
+//    /usr/local/nginx/sbin/logs
+//    xm@hcss-ecs-4208:/usr/local/nginx/sbin/logs$ ls
+//    error.log
+//    2. 运行
+//    xm@hcss-ecs-4208:/usr/local/nginx$ sudo gdb ./sbin/nginx  &&  run -p /usr/local/nginx/
     log = ngx_log_init(ngx_prefix);
     if (log == NULL) {
         return 1;
@@ -301,14 +312,16 @@ main(int argc, char *const *argv)
         return 1;
     }
 
+    // 存储一些全局变量
     if (ngx_save_argv(&init_cycle, argc, argv) != NGX_OK) {
         return 1;
     }
 
+    // 赋值配置文件路径等
     if (ngx_process_options(&init_cycle) != NGX_OK) {
         return 1;
     }
-
+    // 获取cpu & 系统信息
     if (ngx_os_init(log) != NGX_OK) {
         return 1;
     }
@@ -316,20 +329,142 @@ main(int argc, char *const *argv)
     /*
      * ngx_crc32_table_init() requires ngx_cacheline_size set in ngx_os_init()
      */
-
+    // 初始化 crc32 表， 暂略
     if (ngx_crc32_table_init() != NGX_OK) {
         return 1;
     }
 
+    /*
+     * 继承自父进程或操作系统的已打开监听 socket 加入到当前 ngx_cycle_t（init_cycle）中
+     *
+     *1. nginx -s reload
+     *  - master 不关闭原来的监听端口
+     *  - 新 master 启动后，需要 继承老 master 已经打开的 socket
+     *  - 避免中断正在处理的连接
+     *
+     * 2. fork worker 时共享 socket
+     *  - master 创建 worker 进程
+     *  - worker 可以直接使用 master 的监听 socket，避免重新 bind
+     */
     if (ngx_add_inherited_sockets(&init_cycle) != NGX_OK) {
         return 1;
     }
 
+    /*
+     *  Nginx **编译**时注册的全部模块的全局数组
+     *
+     * 1. 模块源定义路径：nginx-1.0.14/objs/ngx_modules.c
+     *
+     * 2. 模块分类：
+     * NGX_CORE_MODULE	核心模块（内存池、日志、事件管理、master/worker）
+     * NGX_CONF_MODULE	配置模块（解析 nginx.conf 指令）
+     * NGX_EVENT_MODULE	事件模块（抽象事件框架、事件驱动实现）
+     * NGX_HTTP_MODULE	HTTP 模块（请求处理、上下文、指令）
+     * NGX_MAIL_MODULE	邮件协议模块（SMTP/IMAP/POP3）
+     * NGX_STREAM_MODULE	TCP/UDP 流模块
+     * NGX_HTTP_FILTER_MODULE	HTTP 输出过滤模块（响应 body/header 过滤器）
+     */
     ngx_max_module = 0;
     for (i = 0; ngx_modules[i]; i++) {
         ngx_modules[i]->index = ngx_max_module++;
     }
 
+    // 为什么要用两个 cycle 结构？
+    // Nginx 启动要先“借”一个轻量 init_cycle 来“生”出真正的 cycle；
+    // reload 时则“拿旧的 cycle 当模板”，再生成一个新的。
+    // Nginx 启动的核心入口 ， 该函数配置解析总结如下：
+    /* ---------------------------
+     * 核心模块配置初始化阶段
+     * ---------------------------
+     * 遍历所有模块，找出核心模块（NGX_CORE_MODULE），
+     * 为每个核心模块调用 create_conf() 创建配置结构体，
+     * 并存入 cycle->conf_ctx 对应位置。
+     */
+
+    //    for (i = 0; ngx_modules[i]; i++) {
+    //
+    //        /* 只处理核心模块 */
+    //        if (ngx_modules[i]->type != NGX_CORE_MODULE) {
+    //            continue;
+    //        }
+    //
+    //        /* 取模块上下文，里面包含 create_conf 回调 */
+    //        module = ngx_modules[i]->ctx;
+    //
+    //        /* 调用模块 create_conf 方法生成配置结构 */
+    //        if (module->create_conf) {
+    //            rv = module->create_conf(cycle);   // 返回指针：模块自己的配置结构体
+    //            if (rv == NULL) {
+    //                ngx_destroy_pool(pool);        // 创建失败则销毁内存池
+    //                return NULL;
+    //            }
+    //
+    //            /* 将配置结构挂载到 conf_ctx 数组，方便全局访问 */
+    //            cycle->conf_ctx[ngx_modules[i]->index] = rv;
+    //        }
+    //    }
+
+    /* ---------------------------
+     * 配置文件解析阶段（ngx_conf_parse）
+     * ---------------------------
+     * 遍历配置文件中的每一条指令，根据指令找到对应模块和回调，
+     * 在模块自己的配置结构中写入配置值。
+     * 对于 HTTP / MAIL / STREAM 模块：
+     *   - create_main_conf / create_srv_conf / create_loc_conf 会在解析块时调用
+     *   - 填充 conf_ctx 第三/四层结构
+     */
+
+    //    if (ngx_conf_parse(&conf, &cycle->conf_file) != NGX_CONF_OK) {
+    //        environ = senv;
+    //        ngx_destroy_cycle_pools(&conf);  // 配置解析失败则销毁 cycle
+    //        return NULL;
+    //    }
+
+    /* ---------------------------
+     * 遍历所有模块，调用 init_module 全局初始化
+     * ---------------------------
+     * init_module() 通常做模块级全局初始化，例如：
+     *   - 注册共享内存
+     *   - 初始化 handler
+     *   - 检查依赖
+     */
+
+    //    for (i = 0; ngx_modules[i]; i++) {
+    //        if (ngx_modules[i]->init_module) {
+    //            if (ngx_modules[i]->init_module(cycle) != NGX_OK) {
+    //                exit(1);  // 初始化失败，直接退出
+    //            }
+    //        }
+    //    }
+
+    /* ---------------------------
+     * HTTP 模块示意：按配置块创建各级结构体
+     * ---------------------------
+     * 在 ngx_http_block() 中：
+     *   - create_main_conf()   -> 为 HTTP 模块创建全局 main 配置结构体
+     *   - create_srv_conf()    -> 为每个 server 块创建 server 配置结构体
+     *   - create_loc_conf()    -> 为每个 location 块创建 location 配置结构体
+     *
+     * 这些结构体最终都会挂载到 cycle->conf_ctx 中：
+     *   - 第三层：模块上下文数组（main / srv / loc）
+     *   - 第四层：具体配置项结构体（ngx_http_core_loc_conf_t 等）
+     *
+     * 解析配置时（ngx_conf_parse + ngx_conf_handler）：
+     *   - 每遇到 HTTP 配置块或指令，就会调用对应 create_conf / merge_conf
+     *   - 将配置值写入相应结构体
+     *   - 保证模块在运行时可以通过 conf_ctx 访问自己的配置
+     *
+     * 举例：
+     *   ngx_http_core_module 的配置：
+     *     cycle->conf_ctx[HTTP模块索引] -> main_conf
+     *                                         -> srv_conf[]
+     *                                         -> loc_conf[]
+     *
+     * 关键点：
+     *   - 核心模块配置简单，一般一层结构
+     *   - HTTP 模块复杂，有多级嵌套
+     *   - 所有模块配置的统一管理，都依赖 cycle->conf_ctx 四级指针结构
+     */
     cycle = ngx_init_cycle(&init_cycle);
     if (cycle == NULL) {
         if (ngx_test_config) {

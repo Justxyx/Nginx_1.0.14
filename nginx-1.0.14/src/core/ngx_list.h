@@ -16,18 +16,18 @@
 typedef struct ngx_list_part_s  ngx_list_part_t;
 
 struct ngx_list_part_s {
-    void             *elts;
-    ngx_uint_t        nelts;
-    ngx_list_part_t  *next;
+    void             *elts;   // 当前节点中存放元素的起始地址（连续内存块）
+    ngx_uint_t        nelts;  // 当前节点中已使用的元素个数
+    ngx_list_part_t  *next;   // 指向下一个节点（链表结构）
 };
 
 
 typedef struct {
-    ngx_list_part_t  *last;
-    ngx_list_part_t   part;
-    size_t            size;
-    ngx_uint_t        nalloc;
-    ngx_pool_t       *pool;
+    ngx_list_part_t  *last;   // 指向当前链表的最后一个节点（用于追加新元素）
+    ngx_list_part_t   part;   // 链表的第一个节点（内嵌结构体）
+    size_t            size;   // 每个元素的大小（bytes）
+    ngx_uint_t        nalloc; // 每个节点最多能容纳的元素个数
+    ngx_pool_t       *pool;   // 内存池指针，用于分配新节点
 } ngx_list_t;
 
 

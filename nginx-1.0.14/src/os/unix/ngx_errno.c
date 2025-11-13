@@ -8,7 +8,7 @@
 #include <ngx_config.h>
 #include <ngx_core.h>
 
-
+// 解释为什么要复制strerror()的消息， 而不是用标准库
 /*
  * The strerror() messages are copied because:
  *
@@ -71,6 +71,26 @@ ngx_strerror_init(void)
             goto failed;
         }
 
+        /*
+         * 📘 数组与指针的区别总结
+         * ------------------------------------------------------------
+         * 1️⃣ 指针数组 (array of pointers)
+         *     char *arr[10];
+         *     → 数组，每个元素是一个指针。
+         *     → 栈上分配，长度固定。
+         *
+         * 2️⃣ 数组指针 (pointer to array)
+         *     char (*p)[10];
+         *     → 指针，指向一个长度为 10 的数组。
+         *     → 常用于函数参数。
+         *
+         * 3️⃣ 动态结构体数组指针（Nginx 用法）
+         *     ngx_str_t *p = malloc(N * sizeof(ngx_str_t));
+         *     → 指针，指向堆上连续的结构体数组。
+         *     → 可下标访问：p[i].data
+         *
+         * ✅ Nginx 的 ngx_sys_errlist 属于第 3 类。
+         */
         ngx_memcpy(p, msg, len);
         ngx_sys_errlist[err].len = len;
         ngx_sys_errlist[err].data = p;

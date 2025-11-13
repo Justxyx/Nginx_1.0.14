@@ -325,13 +325,42 @@ ngx_http_block(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     *cf = pcf;
 
 
+    /*
+     *  初始化 HTTP 请求阶段处理器（phase handlers）：
+     *    - 每个 HTTP 请求在 Nginx 内部分为多个阶段，例如：
+     *        * post-read（读取请求之后）
+     *        * server-rewrite（server 块重写阶段）
+     *        * find-config（查找配置阶段）
+     *        * rewrite（rewrite 阶段）
+     *        * pre-access（访问控制前阶段）
+     *        * access（访问控制阶段）
+     *        * try-files/content（内容处理阶段）
+     *        * log（日志阶段）
+     *    - 模块可以在这些阶段注册处理函数（回调）。
+     *    - ngx_http_init_phase_handlers(cf, cmcf) 会遍历所有 HTTP server
+     *      和 location 配置，收集模块注册的处理函数，构建阶段处理数组。
+     *    - 运行时请求处理会按照这些数组顺序调用对应的 handler。
+     */
     if (ngx_http_init_phase_handlers(cf, cmcf) != NGX_OK) {
         return NGX_CONF_ERROR;
     }
 
 
     /* optimize the lists of ports, addresses and server names */
-
+    /*
+     *  * 2. 优化服务器/端口/地址/域名查找：
+     *    - ngx_http_optimize_servers(cf, cmcf, cmcf->ports) 会处理
+     *      配置文件中所有 HTTP server 的监听端口列表。
+     *    - 它会按以下规则对 server 进行排序和组织：
+     *        * 监听端口
+     *        * IP 地址
+     *        * server_name（精确匹配、通配符、正则）
+     *    - 生成内部数据结构，用于请求到来时快速查找对应的 server 和 location。
+     *
+     * 注意：
+     *  - 这两步发生在所有配置块解析完成、模块的 create_conf/merge_conf 回调执行完毕之后。
+     *  - 作用是将静态配置结构转化为运行时高效的数据结构，以加速请求处理。
+     */
     if (ngx_http_optimize_servers(cf, cmcf, cmcf->ports) != NGX_OK) {
         return NGX_CONF_ERROR;
     }

@@ -40,10 +40,10 @@ ngx_os_init(ngx_log_t *log)
     }
 #endif
 
-    ngx_init_setproctitle(log);
+    ngx_init_setproctitle(log); // 初始化修改进程标题的机制
 
-    ngx_pagesize = getpagesize();
-    ngx_cacheline_size = NGX_CPU_CACHE_LINE;
+    ngx_pagesize = getpagesize();  // 4096
+    ngx_cacheline_size = NGX_CPU_CACHE_LINE; // 64
 
     for (n = ngx_pagesize; n >>= 1; ngx_pagesize_shift++) { /* void */ }
 
@@ -64,16 +64,16 @@ ngx_os_init(ngx_log_t *log)
                       "getrlimit(RLIMIT_NOFILE) failed)");
         return NGX_ERROR;
     }
-
+    // 取当前进程最大可打开文件数
     ngx_max_sockets = (ngx_int_t) rlmt.rlim_cur;
-
+// 非阻塞 socket 支持
 #if (NGX_HAVE_INHERITED_NONBLOCK || NGX_HAVE_ACCEPT4)
     ngx_inherited_nonblocking = 1;
 #else
     ngx_inherited_nonblocking = 0;
 #endif
 
-    srandom(ngx_time());
+    srandom(ngx_time()); // 为 Nginx 随机数生成器初始化种子  用于生成临时标识、哈希等
 
     return NGX_OK;
 }
