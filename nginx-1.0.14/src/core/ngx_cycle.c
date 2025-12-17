@@ -649,6 +649,8 @@ ngx_init_cycle(ngx_cycle_t *old_cycle)
         }
     }
 
+    // master 进程创建socket监听
+    // worker 进程集成后 加入epoll
     if (ngx_open_listening_sockets(cycle) != NGX_OK) {
         goto failed;
     }

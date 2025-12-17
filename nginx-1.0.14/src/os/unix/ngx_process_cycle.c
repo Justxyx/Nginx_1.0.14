@@ -800,17 +800,49 @@ ngx_master_process_exit(ngx_cycle_t *cycle)
     exit(0);
 }
 
-
+/**
+ * ngx_worker_process_cycle —— Nginx worker 进程主循环
+ *
+ * 该函数是 worker 进程的入口函数，由 master 进程通过
+ * ngx_spawn_process() fork 出子进程后调用。每个 worker 进程
+ * 创建后都会进入此函数并在其中执行事件循环，处理网络请求、
+ * 定时器事件以及模块逻辑。
+ *
+ * @cycle: 全局 Nginx 运行周期结构体（包含配置、日志、内存池等）
+ * @data:  传入的参数，通常为 worker 进程编号
+ *
+ * 功能概述:
+ *   - 设置 worker 进程的运行环境（CPU 亲和力、优先级、信号处理等）
+ *   - 初始化事件模块，建立定时器红黑树等
+ *   - 进入事件循环（ngx_process_events_and_timers）
+ *   - 持续处理客户端请求、超时事件、模块事件等
+ *   - 响应 master 进程的控制信号（QUIT/TERM/REOPEN 等）
+ *
+ * 主要流程:
+ *   1. 进程标题设置为 "worker process"
+ *   2. 安装 worker 自己的信号处理函数集
+ *   3. 调用各模块的 init_process 回调
+ *   4. 进入事件驱动循环，持续运行直到接收到退出信号
+ *   5. 退出时调用模块 exit_process 回调完成资源清理
+ *
+ * 特点:
+ *   - worker 进程不再返回 master，退出后由 master 决定是否重启
+ *   - 所有请求处理逻辑均在此循环中完成
+ *   - 每个 worker 进程是独立的，不共享文件描述符以外的状态
+ */
 static void
 ngx_worker_process_cycle(ngx_cycle_t *cycle, void *data)
 {
     ngx_uint_t         i;
     ngx_connection_t  *c;
 
+    /* 设置当前进程类型 */
     ngx_process = NGX_PROCESS_WORKER;
 
+    /* worker 初始化：信号、内存池、CPU 绑定、模块 init_process 调用等 */
     ngx_worker_process_init(cycle, 1);
 
+    /* 设置进程名，方便 ps/top 显示 */
     ngx_setproctitle("worker process");
 
 #if (NGX_THREADS)
@@ -861,8 +893,13 @@ ngx_worker_process_cycle(ngx_cycle_t *cycle, void *data)
 
     for ( ;; ) {
 
+        /*
+         * 正在优雅退出阶段（master 发来 QUIT 信号）
+         * 需要关闭所有空闲连接
+         */
         if (ngx_exiting) {
 
+            // 多进程 全局变量不共享
             c = cycle->connections;
 
             for (i = 0; i < cycle->connection_n; i++) {
@@ -885,14 +922,23 @@ ngx_worker_process_cycle(ngx_cycle_t *cycle, void *data)
 
         ngx_log_debug0(NGX_LOG_DEBUG_EVENT, cycle->log, 0, "worker cycle");
 
+        // worker 的 事件循环核心，负责调度所有连接的 IO 事件和定时器事件，让 worker 持续处理请求。
         ngx_process_events_and_timers(cycle);
 
+        /*
+         * 收到 TERM / INT 信号 → 立即退出（不优雅）
+         */
         if (ngx_terminate) {
             ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0, "exiting");
 
             ngx_worker_process_exit(cycle);
         }
 
+        /*
+         * 收到 QUIT 信号 → 优雅退出
+         * 1. 不再接受新连接
+         * 2. 处理完现有事件再退出
+         */
         if (ngx_quit) {
             ngx_quit = 0;
             ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
@@ -905,6 +951,9 @@ ngx_worker_process_cycle(ngx_cycle_t *cycle, void *data)
             }
         }
 
+        /*
+         * 收到 HUP / USR1 → 重新打开日志文件
+         */
         if (ngx_reopen) {
             ngx_reopen = 0;
             ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0, "reopening logs");
@@ -913,7 +962,28 @@ ngx_worker_process_cycle(ngx_cycle_t *cycle, void *data)
     }
 }
 
-
+/*
+ * 初始化 Worker 进程的运行环境。
+ *
+ * 该函数在 Worker 进程被 fork 出来之后调用，用于完成以下重要工作：
+ *
+ * 1. 重新初始化随机数、时间、日志等与进程相关的资源；
+ * 2. 关闭 Worker 不需要的监听套接字或文件描述符；
+ * 3. 为该 Worker 设置 CPU 亲和性（如果配置了 worker_cpu_affinity）；
+ * 4. 事件模块、定时器等运行基础；
+ * 5. 调用所有模块的 init_process 钩子，让模块在进程级别完成初始化；
+ * 6. 设置进程优先级（nice 值）和信号处理函数；
+ *
+ * 注意：
+ * - Nginx 是多进程模型，每个 Worker 都会 fork 出独立地址空间，因此
+ *   诸如 connections、cycle、connection pools 等看似“全局”的数据结构，
+ *   会在 fork 后被复制到 Worker 各自的内存中，彼此完全独立；
+ * - Worker 不共享任何内存状态（除共享内存区 ngx_shm 等情况外）；
+ *
+ * 参数：
+ *  cycle    Nginx 全局运行周期结构，每个进程有自己的一份副本
+ *  priority 进程优先级配置（nice）
+ */
 static void
 ngx_worker_process_init(ngx_cycle_t *cycle, ngx_uint_t priority)
 {
@@ -938,11 +1008,16 @@ ngx_worker_process_init(ngx_cycle_t *cycle, ngx_uint_t priority)
         }
     }
 
+    /* 如果在配置文件中设置了 rlimit_nofile（最大打开文件数） */
     if (ccf->rlimit_nofile != NGX_CONF_UNSET) {
-        rlmt.rlim_cur = (rlim_t) ccf->rlimit_nofile;
-        rlmt.rlim_max = (rlim_t) ccf->rlimit_nofile;
 
+        /* 将配置的值赋给 rlimit 结构的软限制和硬限制 */
+        rlmt.rlim_cur = (rlim_t) ccf->rlimit_nofile;  // 软限制：当前进程可用的最大 fd 数
+        rlmt.rlim_max = (rlim_t) ccf->rlimit_nofile;  // 硬限制：系统允许的最大 fd 数
+
+        /* 调用系统接口设置进程资源限制 */
         if (setrlimit(RLIMIT_NOFILE, &rlmt) == -1) {
+            /* 设置失败，记录警告日志 */
             ngx_log_error(NGX_LOG_ALERT, cycle->log, ngx_errno,
                           "setrlimit(RLIMIT_NOFILE, %i) failed",
                           ccf->rlimit_nofile);
@@ -1045,9 +1120,22 @@ ngx_worker_process_init(ngx_cycle_t *cycle, ngx_uint_t priority)
      */
     ls = cycle->listening.elts;
     for (i = 0; i < cycle->listening.nelts; i++) {
-        ls[i].previous = NULL;
+        ls[i].previous = NULL;  // worker 进程其实用不到这个， previous 字段大多用在master reload 的时候适配新旧监听列表
     }
 
+    /*
+     * 调用所有模块的 init_process 钩子函数
+     *
+     * 作用：
+     *   - 每个模块有机会在 worker 进程中做自己的初始化
+     *   - 例如：
+     *       - ngx_http_module：初始化 HTTP 相关结构
+     *       - ngx_stream_module：初始化 TCP/UDP 流模块
+     *       - 第三方模块：创建进程级别资源或线程
+     *
+     *
+     *  重点：调用 ngx_event.c -> ngx_event_process_init,  worker 进程创建 epoll fd 并注册监听 socket
+     */
     for (i = 0; ngx_modules[i]; i++) {
         if (ngx_modules[i]->init_process) {
             if (ngx_modules[i]->init_process(cycle) == NGX_ERROR) {
@@ -1056,6 +1144,7 @@ ngx_worker_process_init(ngx_cycle_t *cycle, ngx_uint_t priority)
             }
         }
     }
+
 
     for (n = 0; n < ngx_last_process; n++) {
 
@@ -1077,6 +1166,7 @@ ngx_worker_process_init(ngx_cycle_t *cycle, ngx_uint_t priority)
         }
     }
 
+    // 关闭当前进程自己不需要的管道读端
     if (close(ngx_processes[ngx_process_slot].channel[0]) == -1) {
         ngx_log_error(NGX_LOG_ALERT, cycle->log, ngx_errno,
                       "close() channel failed");

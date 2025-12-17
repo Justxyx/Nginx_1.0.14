@@ -264,7 +264,40 @@ ngx_set_inherited_sockets(ngx_cycle_t *cycle)
     return NGX_OK;
 }
 
-
+/*
+ * ngx_open_listening_sockets
+ *
+ * 作用：
+ *   为 Nginx 配置文件中定义的每个监听端口（ngx_listening_t）创建 socket，
+ *   并完成基本的 socket 初始化和 bind 操作。
+ *
+ * 主要流程：
+ *   1. 遍历 cycle->listening 数组（每个 ngx_listening_t 对应一个监听端口）
+ *   2. 调用系统接口创建 socket（ngx_socket）
+ *   3. 设置 socket 选项（如非阻塞、reuseaddr 等）
+ *   4. 将 socket 绑定到指定的地址和端口（bind）
+ *   5. 标记 ngx_listening_t.open = 1 表示已经打开
+ *
+ * 返回值：
+ *   NGX_OK    - 所有监听 socket 创建成功
+ *   NGX_ERROR - 创建或绑定失败
+ *
+ * 注意：
+ *   - 该函数只在 master 进程初始化阶段调用
+ *   - worker fork 后会继承 master 创建的 socket fd
+ *   - previous 字段在 worker 中需清空，防止误删事件
+ *
+ * 参数：
+ *   cycle - 当前 Nginx 运行周期结构体，包含所有监听端口配置
+ *
+ *
+ *   ngx_init_cycle()
+ *  └── ngx_open_listening_sockets()
+ *          └── socket()
+ *          └── bind()
+ *          └── listen()
+ *
+ */
 ngx_int_t
 ngx_open_listening_sockets(ngx_cycle_t *cycle)
 {

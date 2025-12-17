@@ -202,12 +202,16 @@ ngx_process_events_and_timers(ngx_cycle_t *cycle)
     ngx_uint_t  flags;
     ngx_msec_t  timer, delta;
 
+    // ngx_timer_resolution 为全局变量，用来控制 定时器的精度模式。
+    // 如果 ngx_timer_resolution 被设置（非 0），说明开启了 定时器分辨率模式（timer resolution mode）
+    // worker 等待事件的时候可以 忽略定时器的精确时间，直接用无限等待 NGX_TIMER_INFINITE
+    // 这样做可以减少 epoll_wait 的调用次数，降低 CPU 开销
     if (ngx_timer_resolution) {
         timer = NGX_TIMER_INFINITE;
         flags = 0;
 
     } else {
-        timer = ngx_event_find_timer();
+        timer = ngx_event_find_timer();  // worker 进程在等待事件时的最长阻塞时间
         flags = NGX_UPDATE_TIME;
 
 #if (NGX_THREADS)
@@ -219,32 +223,66 @@ ngx_process_events_and_timers(ngx_cycle_t *cycle)
 #endif
     }
 
+/*
+ * ngx_use_accept_mutex:
+ *   是否启用 accept 互斥锁（accept mutex），用于多 worker 进程监听同一个端口时
+ *   避免“惊群”(Thundering Herd)问题。开启后，只有持有锁的 worker 才能执行 accept，
+ *   其他 worker 会等待，降低 CPU 空转和锁竞争。
+ */
     if (ngx_use_accept_mutex) {
+
+        /*
+         * ngx_accept_disabled:
+         *   一个计数器，控制短时间内不频繁竞争 accept 锁。
+         *   大于 0 表示当前 worker 暂时不尝试抢锁。
+         */
         if (ngx_accept_disabled > 0) {
             ngx_accept_disabled--;
 
         } else {
+            /* 尝试获取 accept mutex 锁 */
             if (ngx_trylock_accept_mutex(cycle) == NGX_ERROR) {
+                /* 获取锁失败，暂时不处理 accept，直接返回 */
                 return;
             }
 
+            /*
+             * ngx_accept_mutex_held:
+             *   标记当前 worker 是否持有 accept 锁
+             */
             if (ngx_accept_mutex_held) {
+                /*
+                 * 当前 worker 成功持有 accept 锁，
+                 * 将事件标记为延迟处理（POST_EVENTS），避免重复处理
+                 */
                 flags |= NGX_POST_EVENTS;
 
             } else {
-                if (timer == NGX_TIMER_INFINITE
-                    || timer > ngx_accept_mutex_delay)
-                {
+                /*
+                 * 当前 worker 没有持有 accept 锁
+                 * 限制 epoll_wait 的等待时间，不要等太久
+                 * 最多等待 ngx_accept_mutex_delay 毫秒，让其他 worker 有机会竞争 accept 锁
+                 */
+                if (timer == NGX_TIMER_INFINITE || timer > ngx_accept_mutex_delay) {
                     timer = ngx_accept_mutex_delay;
                 }
             }
         }
     }
 
+    /* 记录调用事件处理前的当前时间（毫秒） */
     delta = ngx_current_msec;
 
-    (void) ngx_process_events(cycle, timer, flags);
+    /* 调用底层事件模块处理事件
+     * - epoll_wait/kqueue 等会根据 timer 阻塞等待事件
+     * - flags 用于控制事件处理的细节，比如是否更新时间或延迟处理事件
+     */
+    (void) ngx_process_events(cycle, timer, flags);   // linux 平台调用 ngx_epoll_process_events
 
+    /* 计算事件处理消耗的时间（毫秒）
+     * delta = 事件处理后的时间 - 调用前的时间
+     * 用于调试和定时器管理
+     */
     delta = ngx_current_msec - delta;
 
     ngx_log_debug1(NGX_LOG_DEBUG_EVENT, cycle->log, 0,

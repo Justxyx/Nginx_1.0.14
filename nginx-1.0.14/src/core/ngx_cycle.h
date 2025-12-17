@@ -172,7 +172,7 @@ struct ngx_cycle_s {
      * shared_memory : 共享内存列表（缓存、状态、限速等）
      * ---------------------------------------------------------------------
      */
-    ngx_array_t               listening;
+    ngx_array_t               listening;  // 监听 socket 数组，里面保存了 master 进程创建的所有监听端口信息（TCP/UDP）。
     ngx_array_t               pathes;
     ngx_list_t                open_files;
     ngx_list_t                shared_memory;

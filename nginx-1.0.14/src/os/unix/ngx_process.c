@@ -82,6 +82,32 @@ ngx_signal_t  signals[] = {
 };
 
 
+/**
+ * ngx_spawn_process —— 创建一个新的 Nginx 子进程（worker 或辅助进程）
+ *
+ * 该函数由 master 进程调用，用于 fork 出各种子进程，
+ * 包括：worker 进程、cache manager、cache loader 以及模块自定义的辅助进程。
+ *
+ * @cycle:   Nginx 全局运行周期结构体，包含配置、日志、内存池等信息
+ * @proc:    子进程入口函数，子进程启动后从此函数开始执行
+ * @data:    传递给入口函数的参数
+ * @name:    子进程名称，用于 ps/top 等工具显示
+ * @respawn: 子进程重启策略：
+ *             NGX_PROCESS_RESPAWN        - 异常退出后自动重启
+ *             NGX_PROCESS_JUST_SPAWN     - 首次创建
+ *             NGX_PROCESS_DETACHED       - 脱离 master 的独立进程
+ *             NGX_PROCESS_JUST_RESPAWN   - 刚刚重启的子进程
+ *
+ * 返回值:
+ *   父进程中返回：子进程的 PID
+ *   子进程中返回：0
+ *   失败时返回：  NGX_INVALID_PID
+ *
+ * 说明:
+ *   - 函数会在全局进程表 ngx_processes[] 中为进程分配和更新条目
+ *   - 子进程创建后最终会执行入口函数（proc），不会返回到此处
+ *   - Nginx 所有子进程（worker、cache manager 等）都通过此函数创建
+ */
 ngx_pid_t
 ngx_spawn_process(ngx_cycle_t *cycle, ngx_spawn_proc_pt proc, void *data,
     char *name, ngx_int_t respawn)

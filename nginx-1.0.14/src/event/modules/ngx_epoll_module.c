@@ -554,6 +554,17 @@ ngx_epoll_del_connection(ngx_connection_t *c, ngx_uint_t flags)
 }
 
 
+/*
+ * 1. master：只负责 创建监听 socket 和管理 worker，不处理客户端事件，也不调用 epoll_wait
+ * 2. worker：每个 worker 独立创建自己的 epoll fd，然后把 master 创建的监听 socket 注册到自己的 epoll
+ * 3. worker 进程创建 epoll & add_epoll 位于： ngx_worker_process_init -> ngx_modules[i]->init_process
+ * 4. master 进程创建socket 逻辑：
+ *  ngx_init_cycle()
+ *  └── ngx_open_listening_sockets()
+ *          └── socket()
+ *          └── bind()
+ *          └── listen()
+ */
 static ngx_int_t
 ngx_epoll_process_events(ngx_cycle_t *cycle, ngx_msec_t timer, ngx_uint_t flags)
 {
@@ -570,10 +581,13 @@ ngx_epoll_process_events(ngx_cycle_t *cycle, ngx_msec_t timer, ngx_uint_t flags)
     ngx_log_debug1(NGX_LOG_DEBUG_EVENT, cycle->log, 0,
                    "epoll timer: %M", timer);
 
+    //  ep 是 worker 进程自己的 epoll fd
+    //  在 ngx_event_process_init() 中创建的： ep = epoll_create(...);
     events = epoll_wait(ep, event_list, (int) nevents, timer);
 
     err = (events == -1) ? ngx_errno : 0;
 
+    // Nginx 有定时器（超时、keepalive 超时等），worker 需要定期更新时间戳。
     if (flags & NGX_UPDATE_TIME || ngx_event_timer_alarm) {
         ngx_time_update();
     }
@@ -660,6 +674,7 @@ ngx_epoll_process_events(ngx_cycle_t *cycle, ngx_msec_t timer, ngx_uint_t flags)
             revents |= EPOLLIN|EPOLLOUT;
         }
 
+        // 可读事件
         if ((revents & EPOLLIN) && rev->active) {
 
             if ((flags & NGX_POST_THREAD_EVENTS) && !rev->accept) {
@@ -676,12 +691,103 @@ ngx_epoll_process_events(ngx_cycle_t *cycle, ngx_msec_t timer, ngx_uint_t flags)
                 ngx_locked_post_event(rev, queue);
 
             } else {
+                /**
+                 * Nginx Event Handler 机制说明
+                 * -----------------------------------------
+                 *
+                 * 一、rev->handler 是什么？
+                 * ------------------------
+                 *  - 每个 ngx_event_t（读事件）都携带一个 handler 函数指针。
+                 *  - 当 epoll_wait 返回该事件时，会调用：
+                 *        rev->handler(rev);
+                 *  - 不同类型的 fd 会有不同的 handler。
+                 *
+                 *
+                 * 二、监听 listen socket 的 handler 设置
+                 * ---------------------------------------
+                 * 监听 socket 的读事件 handler 在 worker 初始化时设置：
+                 *
+                 *   文件：src/event/ngx_event.c
+                 *   函数：ngx_event_process_init()
+                 *
+                 *   主要代码：
+                 *       ls[i].connection->read->handler = ngx_event_accept;
+                 *       ls[i].connection->read->accept  = 1;
+                 *
+                 * 说明：
+                 *   - 监听 fd 的 EPOLLIN 事件用于处理 accept()
+                 *   - 当有新连接到来时，epoll_wait 返回事件，最终调用：
+                 *         ngx_event_accept()
+                 *
+                 *
+                 * 三、客户端连接（accepted socket）的 handler 设置
+                 * -------------------------------------------------
+                 * 客户端 socket 的读事件 handler 在 ngx_event_accept() 中设置：
+                 *
+                 *   c = ngx_get_connection(s, ev->log);
+                 *   rev = c->read;
+                 *   rev->handler = ngx_http_init_connection;   // 以 HTTP 模块为例
+                 *
+                 * 不同协议模块会设置不同的初始 handler：
+                 *   - HTTP   → ngx_http_init_connection
+                 *   - Stream → ngx_stream_init_connection
+                 *   - Mail   → ngx_mail_init_connection
+                 *
+                 *
+                 * 四、客户端事件处理中的 handler 动态切换
+                 * ------------------------------------------
+                 * 以 HTTP 为例，初始化后会切换为请求解析的 handler：
+                 *
+                 *   ngx_http_init_connection()
+                 *       → rev->handler = ngx_http_process_request_line;
+                 *
+                 * HTTP 在处理过程中会不断切换事件 handler，例如：
+                 *   - ngx_http_process_request_line
+                 *   - ngx_http_process_request_headers
+                 *   - ngx_http_read_client_request_body
+                 *   - upstream 系列回调
+                 *
+                 * 读事件 handler 本质上是 “HTTP 状态机” 的入口指针。
+                 *
+                 *
+                 * 五、epoll_wait() 到 handler 调用链
+                 * -----------------------------------
+                 * epoll_wait() 返回后调用 ngx_epoll_process_events()：
+                 *
+                 *   if ((revents & EPOLLIN) && rev->active) {
+                 *       rev->ready = 1;
+                 *       rev->handler(rev);
+                 *   }
+                 *
+                 * 整体流程：
+                 *   1. epoll_wait 返回
+                 *   2. Nginx 从 event_list[i].data.ptr 得到 ngx_connection_t*
+                 *   3. 根据事件类型调用对应事件的 handler（读或写）
+                 *   4. handler 中继续驱动协议状态机
+                 *
+                 *
+                 * 六、总结（核心要点）
+                 * ---------------------
+                 * 1) Listen Socket 的读 handler：
+                 *        ngx_event_accept()
+                 *
+                 * 2) Accepted Client Socket 的初始读 handler：
+                 *        模块初始化函数（如 ngx_http_init_connection）
+                 *
+                 * 3) 客户端读事件 handler 会根据协议处理过程不断切换。
+                 *
+                 * 4) 最终一致流程：
+                 *      epoll_wait → ngx_epoll_process_events → rev->handler()
+                 *
+                 * 这就是 Nginx 高性能事件驱动模型的核心结构。
+                 */
                 rev->handler(rev);
             }
         }
 
         wev = c->write;
 
+        // 可写事件
         if ((revents & EPOLLOUT) && wev->active) {
 
             if (c->fd == -1 || wev->instance != instance) {

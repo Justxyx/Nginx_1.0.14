@@ -15,51 +15,64 @@
 
 typedef struct ngx_listening_s  ngx_listening_t;
 
+/*
+ * ngx_listening_t —— 监听 socket 对象结构体
+ *
+ * 描述：
+ *   每个 ngx_listening_t 对应一个监听端口（socket），
+ *   保存了 socket 配置、状态、事件处理函数等信息。
+ *
+ * 主要用途：
+ *   1. 保存监听的地址、端口、backlog 等信息
+ *   2. 保存 socket 对应的 connection 对象
+ *   3. 保存事件模块中注册事件的指针（previous）
+ *   4. 为 worker 进程提供独立的监听状态
+ */
 struct ngx_listening_s {
-    ngx_socket_t        fd;
+    ngx_socket_t        fd;                 /* 套接字文件描述符 */
 
-    struct sockaddr    *sockaddr;
-    socklen_t           socklen;    /* size of sockaddr */
-    size_t              addr_text_max_len;
-    ngx_str_t           addr_text;
+    struct sockaddr    *sockaddr;           /* 监听地址 */
+    socklen_t           socklen;            /* sockaddr 大小 */
+    size_t              addr_text_max_len;  /* 地址文本长度上限 */
+    ngx_str_t           addr_text;          /* 地址文本 */
 
-    int                 type;
+    int                 type;               /* socket 类型（TCP/UDP） */
+    int                 backlog;            /* listen backlog */
+    int                 rcvbuf;             /* 接收缓冲区大小 */
+    int                 sndbuf;             /* 发送缓冲区大小 */
 
-    int                 backlog;
-    int                 rcvbuf;
-    int                 sndbuf;
+    ngx_connection_handler_pt handler;      /* 接收到连接后的回调函数 */
+    void               *servers;           /* 对应模块的服务数组，如 ngx_http_in_addr_t */
 
-    /* handler of accepted connection */
-    ngx_connection_handler_pt   handler;
+    ngx_log_t           log;                /* 日志结构 */
+    ngx_log_t          *logp;               /* 指向日志 */
 
-    void               *servers;  /* array of ngx_http_in_addr_t, for example */
+    size_t              pool_size;          /* 每个连接的内存池大小 */
+    size_t              post_accept_buffer_size; /* Windows 特性: AcceptEx 预读缓冲区 */
+    ngx_msec_t          post_accept_timeout;      /* Windows 特性: 延迟 accept 超时 */
 
-    ngx_log_t           log;
-    ngx_log_t          *logp;
+    ngx_listening_t    *previous;           /*
+                                                master 进程已经有监听 socket，然后执行平滑重启（reload）或热升级时才有意义：
+                                                指向之前注册的事件对象
+                                                master 中会保存原始注册事件
+                                                worker fork 后需要清空为 NULL
+                                                否则 worker 会误操作不存在的事件
+                                             */
+    ngx_connection_t   *connection;         /* 当前 socket 对应的 ngx_connection_t 对象 */
 
-    size_t              pool_size;
-    /* should be here because of the AcceptEx() preread */
-    size_t              post_accept_buffer_size;
-    /* should be here because of the deferred accept */
-    ngx_msec_t          post_accept_timeout;
-
-    ngx_listening_t    *previous;
-    ngx_connection_t   *connection;
-
-    unsigned            open:1;
-    unsigned            remain:1;
-    unsigned            ignore:1;
-
-    unsigned            bound:1;       /* already bound */
-    unsigned            inherited:1;   /* inherited from previous process */
+    unsigned            open:1;             /* 是否已打开 */
+    unsigned            remain:1;           /* 保留标志 */
+    unsigned            ignore:1;           /* 是否忽略 */
+    unsigned            bound:1;            /* 是否已 bind */
+    unsigned            inherited:1;        /* 是否继承自 previous process */
     unsigned            nonblocking_accept:1;
     unsigned            listen:1;
     unsigned            nonblocking:1;
-    unsigned            shared:1;    /* shared between threads or processes */
+    unsigned            shared:1;           /* 是否多线程或多进程共享 */
     unsigned            addr_ntop:1;
 
 #if (NGX_HAVE_INET6 && defined IPV6_V6ONLY)
-    unsigned            ipv6only:2;
+    unsigned            ipv6only:2;         /* IPv6 仅模式 */
 #endif
 
 #if (NGX_HAVE_DEFERRED_ACCEPT)
@@ -67,13 +80,12 @@ struct ngx_listening_s {
     unsigned            delete_deferred:1;
     unsigned            add_deferred:1;
 #ifdef SO_ACCEPTFILTER
-    char               *accept_filter;
+    char               *accept_filter;      /* AcceptFilter 名称 */
 #endif
 #endif
 #if (NGX_HAVE_SETFIB)
-    int                 setfib;
+    int                 setfib;             /* 仅 FreeBSD */
 #endif
-
 };
 
 
